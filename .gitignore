@@ -1,0 +1,54 @@
+# Python environment and generated files
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.pytest_cache/
+
+# Model weights, adapters, checkpoints and exports belong on Hugging Face.
+models/
+outputs/
+exports/
+checkpoints/
+*.safetensors
+*.gguf
+*.pt
+*.pth
+*.ckpt
+*.bin
+
+# Training data is published separately, only after review.
+data/
+
+# Download, compilation and experiment caches
+cache/
+.cache/
+unsloth_compiled_cache/
+wandb/
+runs/
+logs/
+*.log
+
+# Credentials and local configuration
+.env
+.env.*
+!.env.example
+.hf_token
+hf_token*
+token.txt
+secrets/
+
+# Local editor and operating system files
+.vscode/
+.DS_Store
+Thumbs.db
+
+/AGENTS.md
+
+# Local checkpoint documentation
+/models/qwen3-4b/FILE_GUIDE.md
+
+# Local baseline analysis
+/BASELINE_PART1_ANALYSIS.md
+/Ai_answers.md

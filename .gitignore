@@ -47,8 +47,10 @@ Thumbs.db
 /AGENTS.md
 
 # Local checkpoint documentation
-/models/qwen3-4b/FILE_GUIDE.md
+/models/**/FILE_GUIDE.md
 
-# Local baseline analysis
-/BASELINE_PART1_ANALYSIS.md
+# Local baseline responses (source snapshots and analyses are already under data/)
 /Ai_answers.md
+
+# Model IDs, dataset paths, and architecture-specific settings stay local.
+/config.local.json

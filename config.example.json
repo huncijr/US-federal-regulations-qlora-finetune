@@ -1,0 +1,36 @@
+{
+  "model": {
+    "id": "",
+    "path": "models/base",
+    "revision_file": "models/base/revision.txt",
+    "load_in_4bit": true,
+    "chat_template_kwargs": {}
+  },
+  "data": {
+    "train": "data/train.jsonl",
+    "validation": "data/validation.jsonl",
+    "test": "data/test.jsonl"
+  },
+  "output_dir": "outputs/training",
+  "training": {
+    "max_steps": 10,
+    "max_seq_length": 512,
+    "lora_rank": 8,
+    "lora_target_modules": "all-linear",
+    "instruction_marker": "",
+    "response_marker": "",
+    "learning_rate": 0.0002,
+    "gradient_accumulation_steps": 4,
+    "seed": 3407
+  },
+  "inference": {
+    "context": 1024,
+    "max_new_tokens": 256,
+    "temperature": 0.7,
+    "top_p": 0.8,
+    "top_k": 20,
+    "seed": 3407
+  },
+  "dashboard_port": 8765,
+  "baseline_run_name": "base"
+}

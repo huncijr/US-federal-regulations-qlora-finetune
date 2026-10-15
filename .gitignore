@@ -54,3 +54,11 @@ Thumbs.db
 
 # Model IDs, dataset paths, and architecture-specific settings stay local.
 /config.local.json
+
+# Historical preparation and abandoned experiment helpers stay local.
+/scripts/ecfr_baseline.py
+/scripts/curate_completed.py
+/scripts/augment_question_variants.py
+/scripts/continue_adapter.py
+/scripts/strengthen_hour_train.py
+/local_experiments/

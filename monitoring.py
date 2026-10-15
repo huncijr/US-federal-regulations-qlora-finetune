@@ -38,7 +38,8 @@ class RunLog:
             output.write(json.dumps(record, allow_nan=False) + "\n")
 
 
-def create_training_callback(directory, train_examples, model, max_steps=0, run_log=None):
+def create_training_callback(directory, train_examples, model, max_steps=0, run_log=None,
+                             stop_deadline=None, run_started_at=None, max_wall_seconds=0):
     """Import training libraries only inside the notebook, never in the web server."""
     from transformers import TrainerCallback
     import torch
@@ -46,7 +47,7 @@ def create_training_callback(directory, train_examples, model, max_steps=0, run_
     class TrainingMonitor(TrainerCallback):
         def __init__(self):
             self.log = run_log or RunLog(directory)
-            self.started = None
+            self.started = run_started_at
             self.microbatches = 0
             self.parameters = {
                 "trainable": sum(p.numel() for p in model.parameters() if p.requires_grad),
@@ -77,10 +78,14 @@ def create_training_callback(directory, train_examples, model, max_steps=0, run_
                 "torch_peak_allocated_gib": torch.cuda.max_memory_allocated() / 1024**3,
                 **extra,
             }
+            if max_wall_seconds and self.started is not None:
+                values["max_wall_seconds"] = max_wall_seconds
+                values["wall_seconds_remaining"] = max(0, max_wall_seconds - elapsed)
             self.log.update(event, **values)
 
         def on_train_begin(self, args, state, control, **kwargs):
-            self.started = time.monotonic()
+            if self.started is None:
+                self.started = time.monotonic()
             self.snapshot(args, state, "start", status="training")
 
         def on_substep_end(self, args, state, control, **kwargs):
@@ -89,6 +94,12 @@ def create_training_callback(directory, train_examples, model, max_steps=0, run_
         def on_step_end(self, args, state, control, **kwargs):
             self.microbatches += 1
             self.snapshot(args, state, "step", status="training")
+            if stop_deadline is not None and time.monotonic() >= stop_deadline:
+                control.should_training_stop = True
+                control.should_evaluate = False
+                self.snapshot(args, state, "time_limit", status="stopping_for_time_budget",
+                              stop_reason="wallclock_budget", eta_seconds=0)
+            return control
 
         def on_log(self, args, state, control, logs=None, **kwargs):
             metrics = dict(self.log.state["metrics"])
@@ -199,6 +210,7 @@ main{max-width:1180px;margin:auto;padding:28px}h1{margin:0;font-size:28px}h2{fon
 <div class="card"><div class="label">Microbatches / estimated examples processed</div><div class="value" id="samples">—</div></div>
 <div class="card"><div class="label">Input tokens processed</div><div class="value" id="tokens">—</div></div>
 <div class="card"><div class="label">Trainable adapter parameters</div><div class="value" id="parameters">—</div></div>
+<div class="card"><div class="label">Whole-run time budget / remaining</div><div class="value" id="budget">—</div></div>
 </div>
 <div class="charts"><div class="panel"><h2>Loss by optimizer step</h2><canvas id="lossChart"></canvas><span class="legend"><span class="blue">● Training</span> &nbsp; <span class="green">● Validation</span></span></div>
 <div class="panel"><h2>Gradient norm by optimizer step</h2><canvas id="gradChart"></canvas><span class="legend">Gradient norm is not a percentage of knowledge learned.</span></div></div>
@@ -240,11 +252,12 @@ async function refresh(){try{
  $('time').textContent=duration(s.elapsed_seconds)+' / '+duration(s.eta_seconds);
  $('samples').textContent=integer(s.microbatches)+' / '+integer(s.processed_examples_estimate);
  $('tokens').textContent=integer(s.input_tokens_seen);$('parameters').textContent=integer(s.parameters?.trainable);
+ $('budget').textContent=s.max_wall_seconds?duration(s.max_wall_seconds)+' / '+duration(s.wall_seconds_remaining):'Not limited';
  const evaluation=s.task_evaluation;
  $('accuracy').textContent=evaluation&&Number.isInteger(evaluation.correct)&&evaluation.total>0?
  (evaluation.correct/evaluation.total*100).toFixed(1)+'% ('+evaluation.correct+' / '+evaluation.total+') — '+(evaluation.method||'See evaluation report'):
  'Not evaluated. Training loss and token prediction accuracy are not factual task correctness.';
- $('saved').textContent=s.adapter_path?'Saved adapter: '+s.adapter_path:'';$('error').textContent=s.error||'';
+ $('saved').textContent=(s.adapter_path?'Saved adapter: '+s.adapter_path:'')+(s.stop_reason?' · Stop reason: '+s.stop_reason:'');$('error').textContent=s.error||'';
  $('updated').textContent=s.updated_utc?'Last log update: '+s.updated_utc:'';
  chart('lossChart',data.points,[{key:'loss',color:'#72b7ff'},{key:'eval_loss',color:'#7ae0b3'}]);
  chart('gradChart',data.points,[{key:'grad_norm',color:'#ffbd73'}]);

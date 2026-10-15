@@ -124,9 +124,14 @@ def main():
         def generate():
             try:
                 with torch.inference_mode():
+                    # Keep max_length consistent with max_new_tokens so that
+                    # Transformers does not emit the max_new_tokens/max_length
+                    # precedence warning on every response. The effective limit
+                    # is unchanged: input length + max_new_tokens.
                     model.generate(
                         **inputs, streamer=streamer,
                         max_new_tokens=args.max_new_tokens,
+                        max_length=int(inputs["input_ids"].shape[1]) + args.max_new_tokens,
                         do_sample=True, temperature=inference["temperature"],
                         top_p=inference["top_p"], top_k=inference["top_k"],
                     )

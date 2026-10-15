@@ -21,6 +21,11 @@
     "response_marker": "",
     "learning_rate": 0.0002,
     "gradient_accumulation_steps": 4,
+    "eval_steps": 500,
+    "eval_max_samples": 512,
+    "max_wall_seconds": 0,
+    "save_reserve_seconds": 180,
+    "final_eval_full": false,
     "seed": 3407
   },
   "inference": {

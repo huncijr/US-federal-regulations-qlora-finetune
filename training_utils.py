@@ -85,6 +85,15 @@ def format_examples(examples, tokenizer, max_length, template_kwargs=None):
     return texts
 
 
+def sample_validation(examples, limit, seed):
+    """Choose a fixed evaluation sample; never sample from the final test set."""
+    if not limit or len(examples) <= limit:
+        return examples
+    import random
+    indices = sorted(random.Random(seed).sample(range(len(examples)), limit))
+    return [examples[index] for index in indices]
+
+
 def _dashboard_payload(url):
     from urllib.request import urlopen
 
@@ -147,6 +156,7 @@ def run_finetuning(project=None, kernel_namespace=None, max_steps=None,
     from monitoring import RunLog, create_training_callback
     from project_config import load_config, runtime_paths, validate_training_config
 
+    wall_started = time.monotonic()
     project = Path(project or Path.cwd()).resolve()
     config = load_config(project, config_path)
     validate_training_config(config)
@@ -157,6 +167,17 @@ def run_finetuning(project=None, kernel_namespace=None, max_steps=None,
     lora_rank = lora_rank if lora_rank is not None else training_config["lora_rank"]
     seed = seed if seed is not None else training_config["seed"]
     dashboard_port = dashboard_port if dashboard_port is not None else config["dashboard_port"]
+    wall_limit = training_config.get("max_wall_seconds", 0)
+    reserve = training_config.get("save_reserve_seconds", 180)
+    if wall_limit < 0 or reserve < 0 or wall_limit and reserve >= wall_limit:
+        raise ValueError("Time limit must be positive or disabled, with a smaller save reserve.")
+    stop_deadline = wall_started + wall_limit - reserve if wall_limit else None
+    eval_interval = training_config.get("eval_steps", 500)
+    eval_limit = training_config.get("eval_max_samples", 512)
+    if eval_interval < 1 or eval_limit < 1:
+        raise ValueError("Evaluation interval and sample size must be positive.")
+    if wall_limit and training_config.get("final_eval_full", False):
+        raise ValueError("Disable final_eval_full for a bounded-time run; evaluate the full set separately.")
     namespace = kernel_namespace if kernel_namespace is not None else {}
     if namespace.get("_finetuning_running"):
         raise RuntimeError("A fine-tuning invocation is already running in this kernel.")
@@ -191,6 +212,8 @@ def run_finetuning(project=None, kernel_namespace=None, max_steps=None,
         for left, right in (("train", "validation"), ("train", "test"), ("validation", "test")):
             check_split_overlap(examples[left], examples[right])
         print("Dataset sizes:", {name: len(rows) for name, rows in examples.items()}, flush=True)
+        evaluation_examples = sample_validation(examples["validation"], eval_limit, seed)
+        print(f"Periodic/final validation sample: {len(evaluation_examples)} examples", flush=True)
 
         print("[3/6] Loading the configured local model once.", flush=True)
         stage_log.update("loading", status="loading_model")
@@ -215,7 +238,7 @@ def run_finetuning(project=None, kernel_namespace=None, max_steps=None,
         from unsloth.chat_templates import train_on_responses_only
         template_kwargs = config["model"]["chat_template_kwargs"]
         train_text = format_examples(examples["train"], tokenizer, max_seq_length, template_kwargs)
-        validation_text = format_examples(examples["validation"], tokenizer, max_seq_length, template_kwargs)
+        validation_text = format_examples(evaluation_examples, tokenizer, max_seq_length, template_kwargs)
         model = FastLanguageModel.get_peft_model(
             model, r=lora_rank, lora_alpha=2 * lora_rank, lora_dropout=0,
             target_modules=training_config["lora_target_modules"],
@@ -234,7 +257,7 @@ def run_finetuning(project=None, kernel_namespace=None, max_steps=None,
                 bf16=torch.cuda.is_bf16_supported(), fp16=not torch.cuda.is_bf16_supported(),
                 logging_steps=1, logging_nan_inf_filter=False,
                 include_num_input_tokens_seen="non_padding",
-                eval_strategy="steps", eval_steps=min(max_steps, 50),
+                eval_strategy="steps", eval_steps=min(max_steps, eval_interval),
                 save_strategy="no", report_to="none", seed=seed,
             ),
         )
@@ -246,13 +269,20 @@ def run_finetuning(project=None, kernel_namespace=None, max_steps=None,
             if any(not any(label != -100 for label in row["labels"]) for row in split):
                 raise ValueError("An example has no assistant tokens contributing to loss.")
         callback = create_training_callback(output_dir / "monitor", len(examples["train"]),
-                                            model, max_steps=max_steps, run_log=stage_log)
+                                            model, max_steps=max_steps, run_log=stage_log,
+                                            stop_deadline=stop_deadline,
+                                            run_started_at=wall_started,
+                                            max_wall_seconds=wall_limit)
+        callback.log.update("budget", validation_examples=len(evaluation_examples),
+                            max_wall_seconds=wall_limit, save_reserve_seconds=reserve)
         trainer.add_callback(callback)
         payload = _dashboard_payload(dashboard_url)
         if payload["state"].get("run_id") != callback.log.state["run_id"]:
             raise RuntimeError("Dashboard is following another directory. Restart it with --log-dir pointing to the configured output directory's monitor folder.")
         print(f"Dashboard ready at 0/{max_steps}. Training starts in {start_delay} seconds.", flush=True)
         time.sleep(start_delay)
+        if stop_deadline is not None and time.monotonic() >= stop_deadline:
+            raise RuntimeError("Setup exhausted the training time budget. No optimizer updates were started.")
 
         print(f"[5/6] Training for {max_steps} optimizer updates, then validating.", flush=True)
         torch.cuda.reset_peak_memory_stats()
@@ -260,7 +290,14 @@ def run_finetuning(project=None, kernel_namespace=None, max_steps=None,
         validation = next((entry for entry in reversed(trainer.state.log_history)
                            if "eval_loss" in entry and entry.get("step") == trainer.state.global_step), None)
         if validation is None:
-            validation = trainer.evaluate()
+            if wall_limit and time.monotonic() >= wall_started + wall_limit - 120:
+                validation = next((entry for entry in reversed(trainer.state.log_history) if "eval_loss" in entry),
+                                  {"evaluation_skipped": True, "reason": "save_time_reserved"})
+            else:
+                validation = trainer.evaluate()
+        if training_config.get("final_eval_full", False) and len(evaluation_examples) != len(examples["validation"]):
+            full_text = format_examples(examples["validation"], tokenizer, max_seq_length, template_kwargs)
+            validation = trainer.evaluate(eval_dataset=Dataset.from_dict({"text": full_text}))
         callback.set_status("evaluated")
 
         print("[6/6] Saving the adapter, metrics, and provenance.", flush=True)
@@ -275,6 +312,11 @@ def run_finetuning(project=None, kernel_namespace=None, max_steps=None,
             "model_id": model_id, "checkpoint_provenance": revision_file.read_text() if revision_file.exists() else "not recorded",
             "config": config,
             "max_steps": max_steps, "max_seq_length": max_seq_length, "lora_rank": lora_rank, "seed": seed,
+            "actual_optimizer_steps": trainer.state.global_step,
+            "validation_sample_count": len(evaluation_examples),
+            "validation_sample_question_hash": hashlib.sha256(json.dumps([row["messages"][0]["content"] for row in evaluation_examples]).encode()).hexdigest(),
+            "max_wall_seconds": wall_limit, "whole_run_seconds_before_save": time.monotonic() - wall_started,
+            "stop_reason": callback.log.state.get("stop_reason", "planned_steps_completed"),
             "dataset_counts": {name: len(rows) for name, rows in examples.items()},
             "dataset_hashes": {name: hashlib.sha256(path.read_bytes()).hexdigest() for name, path in files.items()},
             "packages": {name: version(name) for name in ("torch", "unsloth", "transformers", "bitsandbytes", "peft", "trl", "datasets")},
